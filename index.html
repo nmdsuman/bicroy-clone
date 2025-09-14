@@ -40,6 +40,11 @@
         }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .filter-btn.active {
+            background-color: #2563eb; /* blue-600 */
+            color: white;
+            font-weight: 600;
+        }
     </style>
 </head>
 
@@ -110,11 +115,12 @@
         // Global App ID for Firestore paths
         const appId = firebaseConfig.projectId;
         let currentUser = null;
+        let currentAdminFilter = 'all'; // Default filter for admin
+        let postsUnsubscribe = null; // To detach listener on filter change
 
         // Countdown Timer Globals
         let countdownInterval = null;
-        let activeCountdowns = [];
-
+        
         // UI Elements
         const loadingEl = document.getElementById('loading');
         const authViewEl = document.getElementById('auth-view');
@@ -171,7 +177,6 @@
 
         // --- Authentication ---
         onAuthStateChanged(auth, async (user) => {
-            loadingEl.classList.add('hidden');
             if (user) {
                 currentUser = user;
                 authViewEl.classList.add('hidden');
@@ -183,19 +188,26 @@
                     if (userData) {
                         document.getElementById('welcome-message').textContent = userData.fullName || 'ব্যবহারকারী';
                         document.getElementById('wallet-balance').textContent = `৳${(userData.wallet || 0).toFixed(2)}`;
-                        adminPostSectionEl.classList.toggle('hidden', userData.role !== 'admin');
+                        if (userData.role === 'admin') {
+                            adminPostSectionEl.classList.remove('hidden');
+                            renderAdminControls();
+                        } else {
+                            adminPostSectionEl.classList.add('hidden');
+                        }
                     }
                 });
-
-                renderAdminPostForm();
-                listenForPosts();
+                
+                await listenForPosts();
+                loadingEl.classList.add('hidden');
 
             } else {
                 currentUser = null;
                 if (countdownInterval) clearInterval(countdownInterval);
+                if (postsUnsubscribe) postsUnsubscribe(); // Detach listener on logout
                 authViewEl.classList.remove('hidden');
                 appViewEl.classList.add('hidden');
                 renderAuthForm();
+                loadingEl.classList.add('hidden');
             }
         });
         
@@ -249,69 +261,94 @@
                 }
             } catch (error) {
                 showMessage(error.message, 'error');
-            } finally {
-                loadingEl.classList.add('hidden');
             }
+            // No need to hide loading here, onAuthStateChanged will handle it
         };
 
         // --- Countdown Timer Logic ---
         const startCountdownManager = () => {
             if (countdownInterval) clearInterval(countdownInterval);
-            countdownInterval = setInterval(() => {
-                activeCountdowns.forEach(timer => {
-                    const now = new Date().getTime();
-                    const distance = timer.endTime - now;
-                    const timerEl = document.getElementById(timer.elementId);
 
-                    if (timerEl) {
-                        if (distance < 0) {
-                            timerEl.innerHTML = `<span class="text-green-600 font-bold">শুরু হয়ে গেছে</span>`;
-                            return;
-                        }
-                        const days = Math.floor(distance / (1000 * 60 * 60 * 24));
-                        const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-                        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-                        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-                        
-                        let countdownText = '';
-                        if (days > 0) countdownText += `${days}দি `;
-                        if (hours > 0 || days > 0) countdownText += `${hours}ঘন্টা `;
-                        countdownText += `${minutes}মি ${seconds}সে`;
-                        
-                        timerEl.textContent = countdownText;
+            countdownInterval = setInterval(() => {
+                const countdownElements = document.querySelectorAll('[data-countdown-end]');
+                if(countdownElements.length === 0) {
+                    clearInterval(countdownInterval);
+                    return;
+                }
+
+                countdownElements.forEach(el => {
+                    const endTime = parseInt(el.dataset.countdownEnd, 10);
+                    const now = new Date().getTime();
+                    const distance = endTime - now;
+
+                    if (distance < 0) {
+                        el.innerHTML = `<span class="text-green-600 font-bold">শুরু হয়ে গেছে</span>`;
+                        return;
                     }
+                    const days = Math.floor(distance / (1000 * 60 * 60 * 24));
+                    const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                    const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                    const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+                    
+                    let countdownText = '';
+                    if (days > 0) countdownText += `${days}দি `;
+                    if (hours > 0 || days > 0) countdownText += `${hours}ঘন্টা `;
+                    countdownText += `${minutes}মি ${seconds}সে`;
+                    
+                    el.textContent = countdownText;
                 });
             }, 1000);
         };
 
         // --- Posts and Tournaments ---
-        const listenForPosts = () => {
-            const postsQuery = query(collection(db, 'artifacts', appId, 'public', 'data', 'posts'), orderBy('timestamp', 'desc'));
-            onSnapshot(postsQuery, async (snapshot) => {
-                postsContainerEl.innerHTML = '';
-                activeCountdowns = []; 
+        const listenForPosts = async () => {
+            if (postsUnsubscribe) postsUnsubscribe(); // Detach previous listener if exists
 
-                if (snapshot.empty) {
-                    postsContainerEl.innerHTML = '<p class="text-center text-gray-500 p-8">কোনো টুর্নামেন্ট নেই।</p>';
-                    return;
+            const postsCollection = collection(db, 'artifacts', appId, 'public', 'data', 'posts');
+            const userDoc = await getDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid));
+            const currentUserRole = userDoc.data()?.role;
+
+            let postsQuery;
+            if (currentUserRole === 'admin') {
+                if (currentAdminFilter === 'all') {
+                    postsQuery = query(postsCollection, orderBy('startTime', 'asc'));
+                } else {
+                    postsQuery = query(postsCollection, where('status', '==', currentAdminFilter), orderBy('startTime', 'asc'));
                 }
-                const userDoc = await getDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid));
-                const currentUserRole = userDoc.data().role;
+            } else {
+                postsQuery = query(postsCollection, where('status', '==', 'active'), orderBy('startTime', 'asc'));
+            }
 
-                for (const postDoc of snapshot.docs) {
+            postsUnsubscribe = onSnapshot(postsQuery, async (snapshot) => {
+                const postPromises = snapshot.docs.map(postDoc => {
                     const post = { id: postDoc.id, ...postDoc.data() };
-                    const postElement = await createPostElement(post, currentUserRole);
-                    postsContainerEl.appendChild(postElement);
+                    return createPostElement(post, currentUserRole);
+                });
+
+                const postElements = await Promise.all(postPromises);
+
+                postsContainerEl.innerHTML = '';
+                if (postElements.length === 0) {
+                    postsContainerEl.innerHTML = '<p class="text-center text-gray-500 p-8">কোনো টুর্নামেন্ট নেই।</p>';
+                } else {
+                    postElements.forEach(el => postsContainerEl.appendChild(el));
                 }
+                
                 startCountdownManager();
+            }, (error) => {
+                console.error("Error listening for posts:", error);
+                showMessage("টুর্নামেন্ট লোড করতে সমস্যা হচ্ছে।", "error");
             });
         };
 
+
         const createPostElement = async (post, currentUserRole) => {
             const postElement = document.createElement('div');
-            postElement.className = 'bg-white p-4 rounded-xl shadow-lg border-l-4 border-blue-500';
-
+            
+            // ROBUSTNESS FIX: Check if post.startTime exists, otherwise fallback to contestDetails
             const contestDetails = JSON.parse(post.contestDetails);
+            const startTime = post.startTime ? post.startTime.toDate() : new Date(contestDetails.startTime);
+
             const participantsRef = collection(db, 'artifacts', appId, 'public', 'data', 'posts', post.id, 'participants');
             const participantsSnapshot = await getDocs(participantsRef);
             const participantsCount = participantsSnapshot.size;
@@ -319,25 +356,26 @@
             const participantDoc = await getDoc(doc(participantsRef, currentUser.uid));
             const hasJoined = participantDoc.exists();
 
-            const startTime = new Date(contestDetails.startTime);
             const isFull = participantsCount >= contestDetails.maxPlayers;
             
+            let statusColorClass = 'border-blue-500';
+            if (post.status === 'inactive') statusColorClass = 'border-gray-400';
+            if (post.status === 'complete' || post.status === 'prizes_distributed') statusColorClass = 'border-green-500';
+
+            postElement.className = `bg-white p-4 rounded-xl shadow-lg border-l-4 ${statusColorClass}`;
+
             let prizeListHTML = '';
             if (contestDetails.prizes && contestDetails.prizes.length > 0) {
                 prizeListHTML = contestDetails.prizes.map((prize, index) => {
                     let iconColor = 'text-gray-400';
                     if (index === 0) iconColor = 'text-yellow-500';
+                    if (index === 1) iconColor = 'text-gray-400';
                     if (index === 2) iconColor = 'text-orange-400';
                     return `<span><i class="fas fa-trophy w-4 mr-1 ${iconColor}"></i>${prize.position}: ৳${prize.amount}</span>`;
                 }).join('');
             } else {
                  prizeListHTML = '<span><i class="fas fa-trophy w-4 mr-1 text-yellow-500"></i>পুরস্কার ঘোষণা করা হয়নি</span>';
             }
-
-            activeCountdowns.push({
-                elementId: `countdown-${post.id}`,
-                endTime: startTime.getTime()
-            });
             
             let actionSectionHTML = '';
 
@@ -371,20 +409,36 @@
                     </div>`;
             }
 
+            let adminStatusLabel = '';
+            if (currentUserRole === 'admin') {
+                let statusText = post.status ? post.status.charAt(0).toUpperCase() + post.status.slice(1) : 'Unknown';
+                let statusClass = 'bg-blue-100 text-blue-700';
+                if(post.status === 'inactive') statusClass = 'bg-gray-100 text-gray-700';
+                if(post.status === 'complete') statusClass = 'bg-green-100 text-green-700';
+                if(post.status === 'prizes_distributed') {
+                    statusText = 'Distributed';
+                    statusClass = 'bg-purple-100 text-purple-700';
+                }
+                adminStatusLabel = `<span class="text-xs font-semibold px-2 py-1 rounded-full ${statusClass}">${statusText}</span>`;
+            }
+
             postElement.innerHTML = `
                 <div class="flex justify-between items-start">
                     <div>
                         <p class="text-xl font-bold text-gray-800">${contestDetails.contestName}</p>
                         <p class="text-sm font-medium text-gray-500">${contestDetails.gameName}</p>
                     </div>
-                    <span class="text-xs font-semibold px-2 py-1 rounded-full ${isFull ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${participantsCount}/${contestDetails.maxPlayers} জন</span>
+                    <div class="flex flex-col items-end space-y-2">
+                        <span class="text-xs font-semibold px-2 py-1 rounded-full ${isFull ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${participantsCount}/${contestDetails.maxPlayers} জন</span>
+                        ${adminStatusLabel}
+                    </div>
                 </div>
                 <div class="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm text-gray-600">
                     <div class="col-span-2 space-y-1">${prizeListHTML}</div>
                     <span><i class="fas fa-gamepad w-4 mr-1 text-gray-400"></i>ধরণ: ${contestDetails.contestType}</span>
                     <span><i class="fas fa-id-card w-4 mr-1 text-gray-400"></i>আইডি: ${contestDetails.requiredIdType}</span>
                     <span class="col-span-2"><i class="fas fa-calendar-alt w-4 mr-1 text-gray-400"></i>সময়: ${startTime.toLocaleString('bn-BD')}</span>
-                    <span class="col-span-2"><i class="fas fa-hourglass-half w-4 mr-1 text-red-500"></i>বাকি: <span id="countdown-${post.id}" class="font-bold text-red-600"></span></span>
+                    <span class="col-span-2"><i class="fas fa-hourglass-half w-4 mr-1 text-red-500"></i>বাকি: <span id="countdown-${post.id}" data-countdown-end="${startTime.getTime()}" class="font-bold text-red-600">লোড হচ্ছে...</span></span>
                 </div>
                 ${actionSectionHTML}
             `;
@@ -454,11 +508,33 @@
                 loadingEl.classList.add('hidden');
             }
         };
-
+        
         // --- Admin Functions ---
-        const renderAdminPostForm = () => {
+        const renderAdminControls = () => {
              adminPostSectionEl.innerHTML = `
-                <h3 class="text-xl font-semibold text-gray-700 mb-4">নতুন টুর্নামেন্ট তৈরি করুন</h3>
+                <button id="open-create-post-modal" class="w-full bg-blue-600 text-white font-semibold py-3 rounded-lg hover:bg-blue-700 transition mb-4">
+                    <i class="fas fa-plus-circle mr-2"></i>Create New Tournament
+                </button>
+                <div class="flex justify-center space-x-2 bg-slate-200 p-1 rounded-lg">
+                    <button data-filter="all" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300 active">All</button>
+                    <button data-filter="active" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300">Active</button>
+                    <button data-filter="inactive" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300">Inactive</button>
+                    <button data-filter="complete" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300">Complete</button>
+                </div>
+            `;
+            document.getElementById('open-create-post-modal').onclick = openCreatePostModal;
+            adminPostSectionEl.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.onclick = (e) => {
+                    currentAdminFilter = e.target.dataset.filter;
+                    adminPostSectionEl.querySelector('.filter-btn.active').classList.remove('active');
+                    e.target.classList.add('active');
+                    listenForPosts();
+                }
+            })
+        };
+
+        const openCreatePostModal = () => {
+            const formHTML = `
                 <form id="contest-post-form" class="space-y-4">
                     <div class="grid grid-cols-2 gap-3">
                         <input type="text" name="contestName" placeholder="টুর্নামেন্টের নাম" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
@@ -470,6 +546,11 @@
                         <select name="contestType" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"><option value="1v1">1v1</option><option value="2v2">2v2</option><option value="Free for All">Free for All</option></select>
                         <input type="text" name="roomId" placeholder="রুম আইডি" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                         <input type="text" name="roomPass" placeholder="রুম পাসওয়ার্ড" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        <select name="status" required class="col-span-2 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                            <option value="active">Active</option>
+                            <option value="inactive">Inactive</option>
+                            <option value="complete">Complete</option>
+                        </select>
                     </div>
                     <div class="mt-4">
                         <h4 class="text-md font-semibold text-gray-600 mb-2">পুরস্কারের তালিকা</h4>
@@ -483,14 +564,23 @@
                         <button type="button" id="add-prize-btn" class="mt-2 text-sm text-blue-600 hover:underline font-semibold">+ আরও পুরস্কার যোগ করুন</button>
                     </div>
                     <button type="submit" class="w-full bg-orange-600 text-white font-semibold py-2 rounded-lg hover:bg-orange-700 transition mt-4">পোস্ট করুন</button>
+                    
+                    <div class="flex items-center space-x-2 mt-2">
+                        <button type="button" id="save-draft-btn" class="w-full bg-gray-500 text-white font-semibold py-2 rounded-lg hover:bg-gray-600 transition">ড্রাফট সেভ করুন</button>
+                        <button type="button" id="load-draft-btn" class="w-full bg-blue-500 text-white font-semibold py-2 rounded-lg hover:bg-blue-600 transition">ড্রাফট লোড করুন</button>
+                    </div>
                 </form>
             `;
+            renderModal('createPostModal', 'নতুন টুর্নামেন্ট তৈরি করুন', formHTML);
             document.getElementById('contest-post-form').onsubmit = handleContestPost;
-            document.getElementById('add-prize-btn').onclick = addPrizeField;
+            document.getElementById('add-prize-btn').onclick = () => addPrizeField('', '', '#createPostModal');
+            document.getElementById('save-draft-btn').onclick = () => handleSaveDraft('#createPostModal');
+            document.getElementById('load-draft-btn').onclick = () => handleLoadDraft('#createPostModal');
         };
 
-        const addPrizeField = (position = '', amount = '') => {
-            const container = document.getElementById('prize-list-container');
+        const addPrizeField = (position = '', amount = '', modalSelector) => {
+            const container = document.querySelector(`${modalSelector} #prize-list-container`);
+            if (!container) return;
             const index = container.children.length;
             const prizeField = document.createElement('div');
             prizeField.className = 'flex items-center space-x-2';
@@ -503,10 +593,11 @@
             container.appendChild(prizeField);
         };
         
-        const handleContestPost = async (e) => {
-            e.preventDefault();
-            const formData = new FormData(e.target);
-            const contestDetails = {};
+        const handleSaveDraft = (modalSelector) => {
+            const form = document.querySelector(`${modalSelector} form`);
+            if (!form) return;
+            const formData = new FormData(form);
+            const draftData = {};
             const prizes = [];
             
             for(let [key, value] of formData.entries()) {
@@ -514,6 +605,64 @@
                     const index = key.split('_')[2];
                     const amount = formData.get(`prize_amount_${index}`);
                     prizes.push({ position: value, amount: amount });
+                } else {
+                    draftData[key] = value;
+                }
+            }
+            draftData.prizes = prizes;
+            
+            localStorage.setItem('tournamentDraft', JSON.stringify(draftData));
+            showMessage('ড্রাফট সফলভাবে সেভ হয়েছে!', 'success');
+        };
+
+        const handleLoadDraft = (modalSelector) => {
+            const savedDraft = localStorage.getItem('tournamentDraft');
+            if (!savedDraft) {
+                showMessage('কোনো সেভ করা ড্রাফট পাওয়া যায়নি।', 'info');
+                return;
+            }
+
+            const draftData = JSON.parse(savedDraft);
+            const form = document.querySelector(`${modalSelector} form`);
+            if (!form) return;
+
+            for (const key in draftData) {
+                if (key !== 'prizes' && form.elements[key]) {
+                    form.elements[key].value = draftData[key];
+                }
+            }
+
+            const prizeContainer = form.querySelector('#prize-list-container');
+            prizeContainer.innerHTML = '';
+            if (draftData.prizes && draftData.prizes.length > 0) {
+                draftData.prizes.forEach(prize => {
+                    addPrizeField(prize.position, prize.amount, modalSelector);
+                });
+            } else {
+                addPrizeField('', '', modalSelector);
+            }
+            
+            showMessage('ড্রাফট সফলভাবে লোড হয়েছে।', 'success');
+        };
+        
+        const handleContestPost = async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const contestDetails = {};
+            const prizes = [];
+            let postStatus = 'active';
+            let startTime = '';
+
+            for(let [key, value] of formData.entries()) {
+                if(key.startsWith('prize_position_')) {
+                    const index = key.split('_')[2];
+                    const amount = formData.get(`prize_amount_${index}`);
+                    prizes.push({ position: value, amount: amount });
+                } else if (key === 'status') {
+                    postStatus = value;
+                } else if (key === 'startTime') {
+                    startTime = value;
+                    contestDetails[key] = value;
                 } else {
                     contestDetails[key] = value;
                 }
@@ -524,17 +673,13 @@
             try {
                 await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'posts'), {
                     timestamp: serverTimestamp(),
-                    contestDetails: JSON.stringify(contestDetails)
+                    contestDetails: JSON.stringify(contestDetails),
+                    status: postStatus, 
+                    startTime: new Date(startTime)
                 });
                 showMessage("টুর্নামেন্ট সফলভাবে পোস্ট করা হয়েছে!", 'success');
-                e.target.reset();
-                document.getElementById('prize-list-container').innerHTML = `
-                    <div class="flex items-center space-x-2">
-                        <input type="text" name="prize_position_0" placeholder="অবস্থান (e.g., 1st)" class="w-1/2 px-3 py-2 border border-gray-300 rounded-lg text-sm" required>
-                        <input type="number" name="prize_amount_0" placeholder="পরিমাণ (৳)" class="w-1/2 px-3 py-2 border border-gray-300 rounded-lg text-sm" required>
-                        <button type="button" class="remove-prize-btn hidden bg-red-500 text-white w-8 h-8 rounded-full flex-shrink-0">&times;</button>
-                    </div>
-                `;
+                document.getElementById('createPostModal').querySelector('.close-button').click();
+                
             } catch (error) {
                 showMessage(error.message, 'error');
             } finally {
@@ -542,9 +687,6 @@
             }
         };
 
-        // --- ADMIN: Multi-winner prize distribution functions (NEW) ---
-
-        // 1. Main modal to view players and set prize amounts
         const viewPlayersModal = async (postId) => {
             loadingEl.classList.remove('hidden');
             const postRef = doc(db, 'artifacts', appId, 'public', 'data', 'posts', postId);
@@ -559,14 +701,14 @@
                 if (!postDoc.exists()) throw new Error("Tournament not found!");
 
                 const postData = postDoc.data();
-                const pendingPrizes = postData.pendingPrizes || {}; // Fetch saved prize data
+                const pendingPrizes = postData.pendingPrizes || {};
 
                 let playersHTML = '<p class="text-center text-gray-500">কোনো প্লেয়ার জয়েন করেনি।</p>';
                 if (!participantsSnapshot.empty) {
                     playersHTML = '<div class="space-y-3">';
                     participantsSnapshot.forEach(doc => {
                         const player = doc.data();
-                        const savedPrize = pendingPrizes[doc.id] || ''; // Get prize for this user id
+                        const savedPrize = pendingPrizes[doc.id] || '';
                         playersHTML += `
                             <div class="bg-slate-100 p-3 rounded-lg flex justify-between items-center">
                                 <div>
@@ -590,7 +732,7 @@
                         <div class="max-h-[50vh] overflow-y-auto pr-2">${playersHTML}</div>
                         <div class="mt-6 flex flex-col sm:flex-row gap-3">
                             <button type="button" id="save-progress-btn" class="w-full bg-blue-500 text-white font-semibold py-2 rounded-lg hover:bg-blue-600 transition">Save Progress</button>
-                            <button type="button" id="confirm-distribute-btn" class="w-full bg-green-600 text-white font-semibold py-2 rounded-lg hover:bg-green-700 transition">Confirm & Distribute Prizes</button>
+                            <button type="button" id="confirm-distribute-btn" class="w-full bg-green-600 text-white font-semibold py-2 rounded-lg hover:bg-green-700 transition">Confirm & Distribute</button>
                         </div>
                     </form>
                 `;
@@ -606,8 +748,7 @@
                 loadingEl.classList.add('hidden');
             }
         };
-
-        // 2. Save the prize amounts as a draft in Firestore
+        
         const handleSaveDistribution = async (postId) => {
             const prizeInputs = document.querySelectorAll('.prize-input');
             const pendingPrizes = {};
@@ -631,12 +772,10 @@
             }
         };
 
-        // 3. Show password confirmation modal with preview before final distribution
         const handleConfirmDistribution = async (postId) => {
             const prizeInputs = document.querySelectorAll('.prize-input');
             const winners = [];
             
-            // First, collect winners and their prize amounts
             for (const input of prizeInputs) {
                 const amount = parseFloat(input.value);
                 if (amount > 0) {
@@ -648,7 +787,6 @@
                 return showMessage('অনুগ্রহ করে অন্তত একজন বিজয়ীর পুরস্কার নির্ধারণ করুন।', 'error');
             }
             
-            // Fetch participant data to get full name and game ID
             const participantsRef = collection(db, 'artifacts', appId, 'public', 'data', 'posts', postId, 'participants');
             const participantsSnapshot = await getDocs(participantsRef);
             const participantsData = {};
@@ -656,7 +794,6 @@
                 participantsData[doc.id] = doc.data();
             });
             
-            // Create a detailed winners list with names and IDs
             const detailedWinners = winners.map(winner => {
                 const participant = participantsData[winner.userId] || {};
                 return {
@@ -666,10 +803,8 @@
                 };
             });
 
-            // Sort winners by amount in descending order
             detailedWinners.sort((a, b) => b.amount - a.amount);
             
-            // Generate the preview list HTML
             let previewHTML = '';
             detailedWinners.forEach(winner => {
                 previewHTML += `
@@ -683,7 +818,6 @@
                 `;
             });
 
-            // Combine preview with password input form
             const modalContent = `
                 <div class="mb-4">
                     <h3 class="font-bold text-lg mb-2">পুরস্কার বিতরণের চূড়ান্ত প্রিভিউ</h3>
@@ -691,7 +825,7 @@
                     <div class="space-y-2 max-h-[40vh] overflow-y-auto no-scrollbar">${previewHTML}</div>
                 </div>
                 <form id="admin-auth-form">
-                    <p class="mb-4 text-center text-gray-700">পুরস্কার বিতরণের চূড়ান্ত ধাপ সম্পন্ন করতে, অনুগ্রহ করে আপনার অ্যাডমিন পাসওয়ার্ড দিন।</p>
+                    <p class="mb-4 text-center text-gray-700">বিতরণ সম্পন্ন করতে, অনুগ্রহ করে আপনার অ্যাডমিন পাসওয়ার্ড দিন।</p>
                     <div>
                         <label for="admin-password" class="block text-sm font-medium text-gray-700 mb-1">পাসওয়ার্ড</label>
                         <input type="password" id="admin-password" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500">
@@ -707,7 +841,6 @@
             document.getElementById('admin-auth-form').onsubmit = (e) => handleFinalDistribution(e, postId, winners);
         };
         
-        // 4. Verify admin password and run the prize distribution transaction
         const handleFinalDistribution = async (e, postId, winners) => {
             e.preventDefault();
             const password = e.target['admin-password'].value;
@@ -719,20 +852,17 @@
                 const user = auth.currentUser;
                 const credential = EmailAuthProvider.credential(user.email, password);
                 
-                // Re-authenticate admin
                 await reauthenticateWithCredential(user, credential);
                 
-                // Run transaction to distribute prizes
                 const postRef = doc(db, 'artifacts', appId, 'public', 'data', 'posts', postId);
                 await runTransaction(db, async (transaction) => {
                     for (const winner of winners) {
                         const userRef = doc(db, 'artifacts', appId, 'users', winner.userId);
                         transaction.update(userRef, { wallet: increment(winner.amount) });
                     }
-                    // Mark the post as prizes distributed to prevent double payment
                     transaction.update(postRef, { 
                         status: 'prizes_distributed',
-                        pendingPrizes: {} // Clear pending prizes
+                        pendingPrizes: {} 
                     });
                 });
 
@@ -755,7 +885,8 @@
             const postDoc = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'posts', postId));
             if (!postDoc.exists()) return showMessage('পোস্ট খুঁজে পাওয়া যায়নি!', 'error');
 
-            const contestDetails = JSON.parse(postDoc.data().contestDetails);
+            const postData = postDoc.data();
+            const contestDetails = JSON.parse(postData.contestDetails);
             
             let prizeFieldsHTML = '';
             (contestDetails.prizes || []).forEach((prize, index) => {
@@ -766,6 +897,9 @@
                         <button type="button" class="remove-prize-btn ${index === 0 ? 'hidden' : ''} bg-red-500 text-white w-8 h-8 rounded-full flex-shrink-0">&times;</button>
                     </div>`;
             });
+            
+            // Format the startTime for datetime-local input
+            const startTimeForInput = postData.startTime ? new Date(postData.startTime.toDate().getTime() - (new Date().getTimezoneOffset() * 60000)).toISOString().slice(0, -8) : contestDetails.startTime;
 
             const modalContent = `
                 <form id="edit-post-form" class="space-y-4">
@@ -774,11 +908,16 @@
                         <input type="text" name="gameName" value="${contestDetails.gameName}" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                         <input type="number" name="entryFee" value="${contestDetails.entryFee}" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                         <input type="number" name="maxPlayers" value="${contestDetails.maxPlayers}" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-                        <input type="datetime-local" name="startTime" value="${contestDetails.startTime}" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm col-span-2">
+                        <input type="datetime-local" name="startTime" value="${startTimeForInput}" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm col-span-2">
                         <select name="requiredIdType" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"><option value="Free Fire ID" ${contestDetails.requiredIdType === 'Free Fire ID' ? 'selected' : ''}>Free Fire ID</option><option value="Ludo King ID" ${contestDetails.requiredIdType === 'Ludo King ID' ? 'selected' : ''}>Ludo King ID</option></select>
                         <select name="contestType" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"><option value="1v1" ${contestDetails.contestType === '1v1' ? 'selected' : ''}>1v1</option><option value="2v2" ${contestDetails.contestType === '2v2' ? 'selected' : ''}>2v2</option><option value="Free for All" ${contestDetails.contestType === 'Free for All' ? 'selected' : ''}>Free for All</option></select>
                         <input type="text" name="roomId" value="${contestDetails.roomId}" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                         <input type="text" name="roomPass" value="${contestDetails.roomPass}" required class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        <select name="status" required class="col-span-2 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                            <option value="active" ${postData.status === 'active' ? 'selected' : ''}>Active</option>
+                            <option value="inactive" ${postData.status === 'inactive' ? 'selected' : ''}>Inactive</option>
+                            <option value="complete" ${postData.status === 'complete' ? 'selected' : ''}>Complete</option>
+                        </select>
                     </div>
                      <div class="mt-4">
                         <h4 class="text-md font-semibold text-gray-600 mb-2">পুরস্কারের তালিকা</h4>
@@ -790,8 +929,8 @@
             `;
             renderModal('editPostModal', 'টুর্নামেন্ট এডিট করুন', modalContent);
             document.getElementById('edit-post-form').onsubmit = (e) => handleUpdatePost(e, postId);
-            document.getElementById('add-prize-btn').onclick = () => addPrizeField('', '');
-            document.querySelectorAll('#prize-list-container .remove-prize-btn').forEach(btn => btn.onclick = (e) => e.target.parentElement.remove());
+            document.getElementById('add-prize-btn').onclick = () => addPrizeField('', '', '#editPostModal');
+            document.querySelectorAll('#editPostModal #prize-list-container .remove-prize-btn').forEach(btn => btn.onclick = (e) => e.target.parentElement.remove());
         };
 
         const handleUpdatePost = async (e, postId) => {
@@ -799,13 +938,21 @@
             const formData = new FormData(e.target);
             const updatedDetails = {};
             const prizes = [];
+            let postStatus = 'active';
+            let startTime = '';
 
             for (let [key, value] of formData.entries()) {
                  if(key.startsWith('prize_position_')) {
                     const index = key.split('_')[2];
                     const amount = formData.get(`prize_amount_${index}`);
                     if(value && amount) prizes.push({ position: value, amount: amount });
-                } else {
+                } else if (key === 'status') {
+                    postStatus = value;
+                } else if (key === 'startTime') {
+                    startTime = value;
+                    updatedDetails[key] = value;
+                }
+                 else {
                     updatedDetails[key] = value;
                 }
             }
@@ -815,7 +962,9 @@
             try {
                 const postRef = doc(db, 'artifacts', appId, 'public', 'data', 'posts', postId);
                 await updateDoc(postRef, {
-                    contestDetails: JSON.stringify(updatedDetails)
+                    contestDetails: JSON.stringify(updatedDetails),
+                    status: postStatus,
+                    startTime: new Date(startTime)
                 });
                 showMessage('টুর্নামেন্ট সফলভাবে আপডেট করা হয়েছে!', 'success');
                 document.getElementById('editPostModal').querySelector('.close-button').click();
