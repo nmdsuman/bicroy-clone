@@ -115,7 +115,7 @@
         // Global App ID for Firestore paths
         const appId = firebaseConfig.projectId;
         let currentUser = null;
-        let currentAdminFilter = 'all'; // Default filter for admin
+        let currentAdminFilter = 'active'; // Default filter for admin
         let postsUnsubscribe = null; // To detach listener on filter change
 
         // Countdown Timer Globals
@@ -262,7 +262,6 @@
             } catch (error) {
                 showMessage(error.message, 'error');
             }
-            // No need to hide loading here, onAuthStateChanged will handle it
         };
 
         // --- Countdown Timer Logic ---
@@ -302,7 +301,7 @@
 
         // --- Posts and Tournaments ---
         const listenForPosts = async () => {
-            if (postsUnsubscribe) postsUnsubscribe(); // Detach previous listener if exists
+            if (postsUnsubscribe) postsUnsubscribe(); 
 
             const postsCollection = collection(db, 'artifacts', appId, 'public', 'data', 'posts');
             const userDoc = await getDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid));
@@ -344,8 +343,8 @@
 
         const createPostElement = async (post, currentUserRole) => {
             const postElement = document.createElement('div');
+            postElement.id = `post-${post.id}`;
             
-            // ROBUSTNESS FIX: Check if post.startTime exists, otherwise fallback to contestDetails
             const contestDetails = JSON.parse(post.contestDetails);
             const startTime = post.startTime ? post.startTime.toDate() : new Date(contestDetails.startTime);
 
@@ -388,9 +387,12 @@
                             <p class="font-semibold text-blue-800 flex justify-between items-center mt-1">পাসওয়ার্ড: <code class="bg-blue-200 text-blue-900 px-2 py-1 rounded">${contestDetails.roomPass}</code> <i onclick="copyToClipboard('${contestDetails.roomPass}')" class="fas fa-copy cursor-pointer text-gray-500 ml-2"></i></p>
                         </div>`;
                 } else if (isFull) {
-                    actionSectionHTML = `<button class="w-full mt-4 py-2 bg-red-400 text-white font-semibold rounded-lg cursor-not-allowed" disabled>টুর্নামেন্ট পূর্ণ</button>`;
+                    actionSectionHTML = `<div class="mt-4"><button class="w-full py-2 bg-red-400 text-white font-semibold rounded-lg cursor-not-allowed" disabled>টুর্নামেন্ট পূর্ণ</button></div>`;
                 } else {
-                    actionSectionHTML = `<button class="join-btn w-full mt-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition" data-post-id="${post.id}">জয়েন করুন (৳${contestDetails.entryFee})</button>`;
+                    actionSectionHTML = `
+                        <div id="action-container-${post.id}" class="mt-4">
+                             <button class="join-btn w-full py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition">জয়েন করুন (৳${contestDetails.entryFee})</button>
+                        </div>`;
                 }
             } else if (currentUserRole === 'admin') {
                  let viewPlayerButtonClass = 'bg-indigo-500 hover:bg-indigo-600';
@@ -455,30 +457,47 @@
                 postElement.querySelector('.delete-post-btn').onclick = () => deletePost(post.id);
             }
             if (postElement.querySelector('.join-btn')) {
-                postElement.querySelector('.join-btn').onclick = () => joinContestModal(post.id, contestDetails);
+                postElement.querySelector('.join-btn').onclick = () => showJoinFormInline(post);
             }
             return postElement;
         };
 
-        const joinContestModal = (postId, contestDetails) => {
-            const modalContent = `
-                <form id="join-form" class="space-y-4">
-                    <div>
-                        <label for="user-id-input" class="block text-sm font-medium text-gray-700 mb-1">আপনার ${contestDetails.requiredIdType} দিন</label>
-                        <input type="text" id="user-id-input" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+        const showJoinFormInline = (post) => {
+            const contestDetails = JSON.parse(post.contestDetails);
+            const actionContainer = document.getElementById(`action-container-${post.id}`);
+            if (!actionContainer) return;
+
+            const originalButtonHTML = actionContainer.innerHTML;
+
+            const formHTML = `
+                <div class="space-y-2">
+                    <input type="text" id="user-id-input-${post.id}" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="আপনার ${contestDetails.requiredIdType} দিন">
+                    <p class="text-xs text-center text-red-600">আপনার ওয়ালেট থেকে ৳${contestDetails.entryFee} কেটে নেওয়া হবে।</p>
+                    <div class="flex space-x-2">
+                        <button id="confirm-join-btn-${post.id}" class="w-full bg-green-600 text-white font-semibold py-2 rounded-lg hover:bg-green-700 transition">নিশ্চিত করুন</button>
+                        <button id="cancel-join-btn-${post.id}" class="w-full bg-gray-500 text-white font-semibold py-2 rounded-lg hover:bg-gray-600 transition">বাতিল</button>
                     </div>
-                    <p class="text-sm text-red-600">আপনার ওয়ালেট থেকে ৳${contestDetails.entryFee} কেটে নেওয়া হবে।</p>
-                    <button type="submit" class="w-full bg-blue-600 text-white font-semibold py-2 rounded-lg hover:bg-blue-700 transition">নিশ্চিত করুন</button>
-                </form>
+                </div>
             `;
-            renderModal('joinModal', `"${contestDetails.contestName}" এ জয়েন করুন`, modalContent);
-            document.getElementById('join-form').onsubmit = (e) => handleJoinContest(e, postId, contestDetails);
+            actionContainer.innerHTML = formHTML;
+
+            document.getElementById(`confirm-join-btn-${post.id}`).onclick = () => {
+                const idValue = document.getElementById(`user-id-input-${post.id}`).value;
+                handleJoinContest(post, idValue);
+            };
+
+            document.getElementById(`cancel-join-btn-${post.id}`).onclick = () => {
+                actionContainer.innerHTML = originalButtonHTML;
+                actionContainer.querySelector('.join-btn').onclick = () => showJoinFormInline(post);
+            };
         };
 
-        const handleJoinContest = async (e, postId, contestDetails) => {
-            e.preventDefault();
-            const idValue = e.target['user-id-input'].value;
+
+        const handleJoinContest = async (post, idValue) => {
             if (!idValue.trim()) return showMessage('অনুগ্রহ করে আপনার আইডি লিখুন।', 'error');
+            
+            const postId = post.id;
+            const contestDetails = JSON.parse(post.contestDetails);
 
             loadingEl.classList.remove('hidden');
             const userRef = doc(db, 'artifacts', appId, 'users', currentUser.uid);
@@ -500,8 +519,19 @@
                         joinedAt: serverTimestamp()
                     });
                 });
+
                 showMessage('সফলভাবে যোগদান করেছেন!', 'success');
-                document.getElementById('joinModal').querySelector('.close-button').click();
+
+                const oldElement = document.getElementById(`post-${postId}`);
+                if (oldElement) {
+                    const userDoc = await getDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid));
+                    const currentUserRole = userDoc.data()?.role || 'user';
+                    
+                    const newElement = await createPostElement(post, currentUserRole);
+                    oldElement.replaceWith(newElement);
+                    startCountdownManager();
+                }
+
             } catch (error) {
                 showMessage(error.message, 'error');
             } finally {
@@ -516,10 +546,10 @@
                     <i class="fas fa-plus-circle mr-2"></i>Create New Tournament
                 </button>
                 <div class="flex justify-center space-x-2 bg-slate-200 p-1 rounded-lg">
-                    <button data-filter="all" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300 active">All</button>
-                    <button data-filter="active" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300">Active</button>
+                    <button data-filter="active" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300 active">Active</button>
                     <button data-filter="inactive" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300">Inactive</button>
                     <button data-filter="complete" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300">Complete</button>
+                    <button data-filter="all" class="filter-btn flex-1 text-sm py-2 px-3 rounded-md transition text-gray-700 hover:bg-slate-300">All</button>
                 </div>
             `;
             document.getElementById('open-create-post-modal').onclick = openCreatePostModal;
@@ -898,7 +928,6 @@
                     </div>`;
             });
             
-            // Format the startTime for datetime-local input
             const startTimeForInput = postData.startTime ? new Date(postData.startTime.toDate().getTime() - (new Date().getTimezoneOffset() * 60000)).toISOString().slice(0, -8) : contestDetails.startTime;
 
             const modalContent = `
